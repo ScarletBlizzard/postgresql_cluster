@@ -1,0 +1,184 @@
+---
+- name: Install Prometheus
+  hosts: prometheus
+  become: true
+  become_method: sudo
+  roles:
+    - prometheus.prometheus.prometheus
+  vars:
+    prometheus_scrape_configs:
+    - job_name: prometheus
+      metrics_path: /metrics
+      static_configs:
+        - targets:
+            - "{{ ansible_fqdn | default(ansible_host) | default('localhost') }}:9090"
+
+    - job_name: blackbox
+      metrics_path: /probe
+      params:
+        module:
+        - http_2xx
+      relabel_configs:
+      - source_labels:
+        - __address__
+        target_label: __param_target
+      - source_labels:
+        - __param_target
+        target_label: instance
+      - replacement: localhost:9115
+        target_label: __address__
+      static_configs:
+      - targets:
+        - 91.185.85.213/WeatherForecast
+        
+    - job_name: node
+      basic_auth:
+        username: randomuser
+        password: examplepassword
+      file_sd_configs:
+        - files:
+            - "{{ prometheus_config_dir }}/file_sd/node.yml"
+
+    - job_name: etcd
+      file_sd_configs:
+        - files:
+            - "{{ prometheus_config_dir }}/file_sd/etcd.yml"
+
+    - job_name: postgres
+      file_sd_configs:
+        - files:
+            - "{{ prometheus_config_dir }}/file_sd/postgres.yml"
+            
+    - job_name: patroni
+      file_sd_configs:
+        - files:
+            - "{{ prometheus_config_dir }}/file_sd/patroni.yml"
+
+    prometheus_targets:
+      node:
+      - targets: "{{ groups['all'] | product([':9100']) | map('join') | list }}"
+      etcd:
+      - targets: "{{ groups['etcd_cluster'] | product([':2379']) | map('join') | list }}"
+      postgres:
+      - targets: "{{ groups['postgres_cluster'] | product([':9187']) | map('join') | list }}"
+      patroni:
+      - targets: "{{ groups['postgres_cluster'] | product([':8008']) | map('join') | list }}"
+
+    prometheus_alertmanager_config:
+      - static_configs:
+          - targets: ["127.0.0.1:9093"]
+    
+    prometheus_alert_rules:
+      - alert: ApiDown
+        expr: probe_http_status_code >= 500
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: API probe HTTP failure (instance {{ '{{ $labels.instance }}' }})
+          description: "HTTP status code is 5xx\n  VALUE = {{ '{{ $value }}' }}\n  LABELS = {{ '{{ $labels }}' }}"
+
+      - alert: HostOutOfMemory
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100 < 10) * on(instance) group_left (nodename) node_uname_info{nodename=~".+"}
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host out of memory (instance {{ '{{ $labels.instance }}' }})"
+          description: "Node memory is filling up (< 10% left)\n  VALUE = {{ '{{ $value }}' }}\n  LABELS = {{ '{{ $labels }}' }}"
+      
+      - alert: PatroniHasNoLeader
+        expr: (max by (scope) (patroni_master) < 1) and (max by (scope) (patroni_standby_leader) < 1)
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Patroni has no Leader (instance {{ '{{ $labels.instance }}' }})
+          description: "A leader node (neither primary nor standby) cannot be found inside the cluster {{ '{{ $labels.scope }}' }}\n  VALUE = {{ '{{ $value }}' }}\n  LABELS = {{ '{{ $labels }}' }}"
+      
+      - alert: EtcdInsufficientMembers
+        expr: count(etcd_server_id) % 2 == 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Etcd insufficient Members (instance {{ '{{ $labels.instance }}' }})
+          description: "Etcd cluster should have an odd number of members\n  VALUE = {{ '{{ $value }}' }}\n  LABELS = {{ '{{ $labels }}' }}"
+
+      - alert: EtcdNoLeader
+        expr: etcd_server_has_leader == 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Etcd no Leader (instance {{ '{{ $labels.instance }}' }})
+          description: "Etcd cluster have no leader\n  VALUE = {{ '{{ $value }}' }}\n  LABELS = {{ '{{ $labels }}' }}"
+
+      - alert: EtcdHighNumberOfLeaderChanges
+        expr: increase(etcd_server_leader_changes_seen_total[10m]) > 2
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: Etcd high number of leader changes (instance {{ '{{ $labels.instance }}' }})
+          description: "Etcd leader changed more than 2 times during 10 minutes\n  VALUE = {{ '{{ $value }}' }}\n  LABELS = {{ '{{ $labels }}' }}"
+      
+      - alert: PostgresqlDown
+        expr: pg_up == 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Postgresql down (instance {{ '{{ $labels.instance }}' }})
+          description: "Postgresql instance is down\n  VALUE = {{ '{{ $value }}' }}\n  LABELS = {{ '{{ $labels }}' }}"
+
+- name: Install blackbox exporter
+  hosts: prometheus
+  become: true
+  roles:
+    - prometheus.prometheus.blackbox_exporter
+  vars:
+    blackbox_exporter_configuration_modules:
+      http_2xx:
+        prober: http
+        timeout: 5s
+        http:
+          method: GET
+          valid_status_codes: [200]
+          headers:
+            Host: weather-api-94
+
+- name: Install Alertmanager
+  hosts: prometheus
+  roles:
+    - prometheus.prometheus.alertmanager
+  vars:
+    alertmanager_receivers:
+      - name: telepush
+        webhook_configs:
+        - url: https://telepush.dev/api/inlets/alertmanager/af3ecf
+    alertmanager_route:
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 3h
+      receiver: telepush
+
+- name: Install node exporters
+  hosts: all
+  become: true
+  become_method: sudo
+  roles:
+    - prometheus.prometheus.node_exporter
+  vars:
+    node_exporter_basic_auth_users:
+      randomuser: examplepassword
+
+- name: Install Postgres exporters
+  hosts: postgres_cluster
+  become: true
+  become_method: sudo
+  roles:
+  - role: ome.prometheus_postgres
+    prometheus_postgres_dbname: postgres
+...
