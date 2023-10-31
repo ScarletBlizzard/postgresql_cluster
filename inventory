@@ -10,22 +10,25 @@
 # In this example, all components will be installed on PostgreSQL nodes.
 # You can deploy the haproxy balancers and the etcd or consul cluster on other dedicated servers (recomended).
 
+[prometheus]
+10.0.10.3 ansible_host=91.185.86.86
+
 # if dcs_exists: false and dcs_type: "etcd"
 [etcd_cluster]  # recommendation: 3, or 5-7 nodes
-10.0.10.3 ansible_host=91.185.85.229
-10.0.10.4 ansible_host=91.185.85.230
-10.0.10.5 ansible_host=91.185.85.250
+10.0.10.4 ansible_host=91.185.85.229
+10.0.10.5 ansible_host=91.185.85.230
+10.0.10.6 ansible_host=91.185.85.250
 
 # if with_haproxy_load_balancing: true
 [balancers]
-10.0.10.2 ansible_host=91.185.86.86
+10.0.10.2 ansible_host=91.185.85.46
 
 # PostgreSQL nodes
 [master]
-10.0.10.3 ansible_host=91.185.85.229 hostname=pgnode01 postgresql_exists=false
+10.0.10.4 ansible_host=91.185.85.229 hostname=pgnode01 postgresql_exists=false
 
 [replica]
-10.0.10.4 ansible_host=91.185.85.230 hostname=pgnode02 postgresql_exists=false
+10.0.10.5 ansible_host=91.185.85.230 hostname=pgnode02 postgresql_exists=false
 
 [postgres_cluster:children]
 master
